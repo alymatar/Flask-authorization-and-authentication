@@ -1,11 +1,6 @@
-<!--
-Draft for Aly. This README describes the code as it is, plus the changes in
-flask_auth_test_fix.md (TestConfig, .env.example, .gitignore, the CI workflow and
-the permission fix). Apply those first, or remove the matching lines below.
-Delete this comment before committing.
--->
-
 # Flask Authentication & Authorization API
+
+![tests](https://github.com/alymatar/Flask-authorization-and-authentication/actions/workflows/tests.yml/badge.svg)
 
 A REST API built with Flask, SQLAlchemy and PostgreSQL that implements authentication and role-based access control (RBAC) from scratch: no Flask-Login and no Flask-JWT extensions.
 
