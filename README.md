@@ -1,189 +1,221 @@
-# Система аутентификации и авторизации Flask
+<!--
+Draft for Aly. This README describes the code as it is, plus the changes in
+flask_auth_test_fix.md (TestConfig, .env.example, .gitignore, the CI workflow and
+the permission fix). Apply those first, or remove the matching lines below.
+Delete this comment before committing.
+-->
 
-Кастомная система аутентификации и авторизации, построенная на Flask, реализующая управление доступом на основе ролей (RBAC) с нуля.
+# Flask Authentication & Authorization API
 
-## Функциональность
+A REST API built with Flask, SQLAlchemy and PostgreSQL that implements authentication and role-based access control (RBAC) from scratch: no Flask-Login and no Flask-JWT extensions.
 
-### Управление пользователями
-- Регистрация с email/паролем
-- Вход в систему (возвращает JWT токен и устанавливает cookie сессии)
-- Выход из системы
-- Обновление профиля
-- Мягкое удаление (is_active=False)
+I built it to understand how JWT, server-side sessions and permission systems work underneath the libraries that usually hide them.
 
-### Аутентификация
-- Кастомная аутентификация без Flask-Login
-- Поддержка как JWT (Bearer токен), так и сессионной аутентификации
-- Хеширование паролей с помощью bcrypt
-- Управление сессиями в базе данных
+## Features
 
-### Авторизация
-- Кастомное управление доступом на основе ролей (RBAC)
-- Гранулярные разрешения для каждой роли по каждому ресурсу
-- Разрешения на основе владельца (пользователи могут изменять свои ресурсы)
-- API администратора для управления разрешениями
+**Authentication**
+- Register and log in with email and password
+- Passwords hashed with bcrypt (12 rounds)
+- Password rules enforced at registration: 6–50 characters with an uppercase letter, a lowercase letter, a digit and a special character, plus a matching confirmation field
+- Two ways to authenticate on every request:
+  - JWT access token in the `Authorization: Bearer` header (HS256, 1 hour by default)
+  - Session cookie (`session_id`, HttpOnly, SameSite=Lax) backed by a `sessions` table, valid for 7 days
+- Refresh tokens (30 days by default) to get a new access token
+- Logout deletes the server-side session and clears the cookie
+- Users can list their active sessions and end any session except the current one
+- Soft delete: deleting an account sets `is_active = False`, and inactive users can't authenticate
 
-## Схема базы данных
+**Authorization (RBAC)**
+- Roles (`admin`, `manager`, `user`, `guest`) have rules per business element (`products`, `orders`, `users`, ...)
+- Each rule has separate flags: read own / read all, create, update own / update all, delete own / delete all
+- Ownership checks: a user with "own" permission can change only resources they created
+- List endpoints return everything for roles with "read all", and only the caller's own records otherwise
+- Admin API to manage roles, business elements, permission rules and user roles at runtime
+- System roles can't be edited or deleted, and a role assigned to users can't be deleted
 
-### Таблицы
+**Engineering**
+- App factory pattern with blueprints
+- Request validation with marshmallow schemas
+- Reusable decorators: `@login_required`, `@permission_required(element, action)`, `@admin_required`, `@optional_login`
+- JSON error handlers for 400, 401, 403, 404 and 500
+- CORS configured for a local frontend
+- 16 pytest tests that run on in-memory SQLite, so no database server is needed
 
-#### users (пользователи)
-- `id` (PK)
-- `email` (уникальный)
-- `password_hash` (хеш пароля)
-- `first_name`, `last_name`, `patronymic` (имя, фамилия, отчество)
-- `is_active` (активен)
-- `created_at`, `updated_at` (дата создания, дата обновления)
-- `role_id` (FK к roles)
-- `last_login_at`, `last_login_ip` (последний вход, IP последнего входа)
+## Tech stack
 
-#### sessions (сессии)
-- `id` (токен сессии, PK)
-- `user_id` (FK к users)
-- `created_at`, `expires_at` (дата создания, дата истечения)
-- `ip_address` (IP-адрес)
+| | |
+|---|---|
+| Language | Python 3 |
+| Framework | Flask 2.3 |
+| Database | PostgreSQL, via Flask-SQLAlchemy (SQLAlchemy 2.0) and psycopg2 |
+| Migrations | Flask-Migrate (installed and initialised) |
+| Auth | PyJWT, bcrypt |
+| Validation | marshmallow |
+| Testing | pytest, pytest-flask |
 
-#### roles (роли)
-- `id` (PK)
-- `name` (уникальный: admin, manager, user, guest)
-- `description` (описание)
+## Architecture
 
+```text
+app/
+├── __init__.py          # app factory, extensions, blueprints, error handlers
+├── models/              # User, Role, Session, BusinessElement, AccessRoleRule
+├── routes/              # auth, users, products, orders, admin blueprints
+├── schemas/             # marshmallow validation for users and permission rules
+├── services/
+│   ├── auth_service.py        # JWT creation/validation, DB sessions, refresh
+│   └── permission_service.py  # permission helpers
+├── utils/decorators.py  # login_required, permission_required, admin_required
+└── tests/               # pytest suites for auth and permissions
+config.py                # Config (reads .env) and TestConfig (in-memory SQLite)
+init_db.py               # creates tables and seeds roles, rules and demo users
+run.py                   # development entry point
+```
 
+How a protected request is checked:
 
-#### business_elements (бизнес-элементы)
-- `id` (PK)
-- `name` (уникальный: products, orders, users, permissions)
-- `description` (описание)
-- `created_at` (дата создания)
+```text
+request
+  → @login_required        find the user from the Bearer token, or else the session cookie
+  → @permission_required   load the rule for (user's role, business element)
+  → User.has_permission    check the flag, plus ownership for "own" permissions
+  → view                   allowed, or 401 / 403
+```
 
-#### access_role_rules (правила доступа ролей)
-- `id` (PK)
-- `role_id` (FK)
-- `element_id` (FK)
-- Флаги разрешений:
-  - `read_permission` (может читать свои)
-  - `read_all_permission` (может читать все)
-  - `create_permission` (может создавать)
-  - `update_permission` (может обновлять свои)
-  - `update_all_permission` (может обновлять все)
-  - `delete_permission` (может удалять свои)
-  - `delete_all_permission` (может удалять все)
+### Data model
 
-## Логика разрешений
+| Table | Key columns |
+|---|---|
+| `users` | `id`, `email` (unique), `password_hash`, `first_name`, `last_name`, `patronymic`, `is_active`, `role_id` → roles, `last_login_at`, `last_login_ip` |
+| `roles` | `id`, `name` (unique), `description`, `is_system_role` |
+| `sessions` | `id` (UUID token), `user_id` → users, `expires_at`, `ip_address`, `user_agent` |
+| `business_elements` | `id`, `name` (unique), `description` |
+| `access_role_rules` | `role_id`, `element_id` (unique together), `read`, `read_all`, `create`, `update`, `update_all`, `delete`, `delete_all` flags |
 
-Система использует гибридный подход:
-1. **Управление доступом на основе ролей (RBAC)**: У пользователей есть роли, у ролей есть разрешения
-2. **Доступ на основе владельца**: Пользователи обычно могут изменять созданные ими ресурсы
+> Products and orders are **demo resources**: they are kept in memory inside the route modules so the permission system has something to protect. Users, roles, sessions and rules are stored in PostgreSQL.
 
-Проверка разрешений:
-Запрос → Получить пользователя → Получить роли пользователя → Получить разрешения ролей →
-Проверить конкретное разрешение для элемента → Разрешить/Запретить
+## API endpoints
 
+**Auth**: `/api/auth`
 
-## API эндпоинты
+| Method | Path | Access | Description |
+|---|---|---|---|
+| POST | `/register` | public | Create an account (gets the `user` role) |
+| POST | `/login` | public | Returns `access_token` and `refresh_token`, and sets the `session_id` cookie |
+| POST | `/refresh` | public | Exchange a `refresh_token` for a new access token |
+| POST | `/logout` | cookie | Delete the current session and clear the cookie |
+| GET | `/me` | logged in | Current user's profile |
+| GET | `/check` | public | Whether the request is authenticated |
 
-### Публичные эндпоинты
-- `POST /api/auth/register` - Регистрация нового пользователя
-- `POST /api/auth/login` - Вход пользователя в систему
+**Users**: `/api/users`
 
-### Аутентифицированные эндпоинты (любой авторизованный пользователь)
-- `POST /api/auth/logout` - Выход из системы
-- `GET /api/auth/me` - Получить информацию о текущем пользователе
-- `PUT /api/users/<id>` - Обновить профиль
-- `DELETE /api/users/<id>` - Мягкое удаление аккаунта
+| Method | Path | Access | Description |
+|---|---|---|---|
+| GET | `/<id>` | `users:read` | A user's profile (own profile, or any with "read all") |
+| PUT | `/<id>` | self | Update own profile |
+| DELETE | `/<id>` | self | Soft-delete own account |
+| GET | `/<id>/sessions` | self | List own active sessions |
+| DELETE | `/<id>/sessions/<session_id>` | self | End another session (not the current one) |
 
-### Эндпоинты бизнес-логики (демонстрация разрешений)
-- `GET /api/products` - Список продуктов (фильтруется по разрешениям)
-- `POST /api/products` - Создать продукт
-- `PUT /api/products/<id>` - Обновить продукт (проверяет владельца)
-- `GET /api/orders` - Список заказов (фильтруется по разрешениям)
+**Demo resources**: `/api/products` and `/api/orders`
 
-### Эндпоинты администратора (требуется роль admin)
-- `GET /api/admin/roles` - Список всех ролей
-- `GET /api/admin/elements` - Список бизнес-элементов
-- `GET /api/admin/permissions` - Список правил разрешений
-- `POST /api/admin/permissions` - Создать правило разрешения
-- `PUT /api/admin/permissions/<id>` - Обновить правило разрешения
-- `DELETE /api/admin/permissions/<id>` - Удалить правило разрешения
-- `POST /api/admin/users/<id>/roles` - Назначить роль пользователю
-- `DELETE /api/admin/users/<id>/roles/<id>` - Удалить роль у пользователя
-- `GET /api/admin/stats` - Статистика системы
+| Method | Path | Permission |
+|---|---|---|
+| GET | `/api/products`, `/api/products/<id>` | `products:read` |
+| POST | `/api/products` | `products:create` |
+| PUT | `/api/products/<id>` | `products:update` (+ ownership) |
+| DELETE | `/api/products/<id>` | `products:delete` (+ ownership) |
+| GET | `/api/orders`, `/api/orders/<id>` | `orders:read` |
+| POST | `/api/orders` | `orders:create` |
+| POST | `/api/orders/<id>/cancel` | `orders:update` (+ ownership) |
 
-## Примеры разрешений
+**Admin** (`admin` role only): `/api/admin`
 
-### Разрешения обычного пользователя
-- Может просматривать все продукты
-- Может создавать новые продукты
-- Может обновлять/удалять только свои продукты
-- Может просматривать только свои заказы
-- Может создавать/обновлять/удалять только свои заказы
+| Method | Path | Description |
+|---|---|---|
+| GET, POST | `/roles` | List or create roles |
+| PUT, DELETE | `/roles/<id>` | Edit or delete a non-system role |
+| GET, POST | `/elements` | List or create business elements |
+| GET, POST | `/permissions` | List or create permission rules |
+| PUT, DELETE | `/permissions/<id>` | Edit or delete a rule |
+| GET | `/users` | List users |
+| PUT | `/users/<id>/role` | Change a user's role |
+| GET | `/stats` | Counts of users, roles and rules |
 
-### Разрешения менеджера
-- Полный CRUD для продуктов (кроме удаления чужих)
-- Может просматривать все заказы
-- Может создавать заказы
-- Может обновлять/удалять только свои заказы
-- Может просматривать всех пользователей (только чтение)
+### Default roles (seeded by `init_db.py`)
 
-### Разрешения администратора
-- Полный доступ ко всему
-- Может управлять правилами разрешений
-- Может назначать роли пользователям
+| Role | Products | Orders | Users |
+|---|---|---|---|
+| admin | everything | everything | everything (plus all other elements) |
+| manager | read all, create, update all, delete own | read all, create, update own | read all |
+| user | read all, create, update/delete own | read, create, update own | — |
+| guest | read all | — | — |
 
-## Установка
+## Run locally
 
-1. Клонируйте репозиторий
-2. Установите зависимости:
+**Requirements:** Python 3.10+ and PostgreSQL. If you have Docker, this starts a local Postgres:
+
 ```bash
+docker run --name flask-auth-db -e POSTGRES_PASSWORD=<choose-a-password> \
+  -e POSTGRES_DB=flask_auth -p 5432:5432 -d postgres:16
+```
+
+```bash
+git clone https://github.com/alymatar/Flask-authorization-and-authentication.git
+cd Flask-authorization-and-authentication
+
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-```
-3. Создайте файл `.env` в корневой директории проекта и настройте следующие переменные окружения:
 
-```env
-# Секретный ключ Flask (измените в продакшене!)
-SECRET_KEY=ваш-секретный-ключ-здесь
-
-# Секретный ключ JWT (измените в продакшене!)
-JWT_SECRET_KEY=ваш-jwt-секретный-ключ-здесь
-
-# Срок действия токена JWT (опционально, показаны значения по умолчанию)
-JWT_ACCESS_TOKEN_EXPIRES_HOURS=1
-JWT_REFRESH_TOKEN_EXPIRES_DAYS=30
-
-# URL базы данных (пример для PostgreSQL)
-DATABASE_URL=postgresql://имя_пользователя:пароль@localhost:5432/имя_базы_данных
+cp .env.example .env              # then edit .env with your own values
+python init_db.py                 # creates tables, roles, rules and demo users
+python run.py                     # http://127.0.0.1:5000
 ```
 
-**Важные примечания:**
-- `DATABASE_URL` должен соответствовать вашей настройке PostgreSQL
-- Для разработки можно использовать значения по умолчанию из `config.py`
+`.env` holds `SECRET_KEY`, `JWT_SECRET_KEY`, `DATABASE_URL` and the optional token lifetimes. It is git-ignored; `.env.example` lists every variable with placeholder values.
 
-4. Запустите приложение:
+`init_db.py` creates four demo accounts (`admin@`, `manager@`, `user@` and `guest@example.com`) and prints their passwords. They're for local testing only.
+
+### Try it with curl
+
 ```bash
-python run.py
+# 1. Register
+curl -X POST http://127.0.0.1:5000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"jane@example.com","password":"Secret123!","password_confirm":"Secret123!","first_name":"Jane","last_name":"Doe"}'
+
+# 2. Log in and copy the access_token from the response
+curl -X POST http://127.0.0.1:5000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"jane@example.com","password":"Secret123!"}'
+
+# 3. Call a protected route
+curl http://127.0.0.1:5000/api/auth/me -H "Authorization: Bearer <access_token>"
+
+# 4. A regular user calling an admin route gets 403 Forbidden
+curl http://127.0.0.1:5000/api/admin/roles -H "Authorization: Bearer <access_token>"
 ```
 
-## Запуск тестов
+## Tests
 
-1. Установите зависимости для тестирования:
-```bash
-pip install -r requirements.txt
-```
-2. Запустите тесты:
 ```bash
 pytest
 ```
 
-## Инициализация базы данных
+The tests use `TestConfig` (in `config.py`), which points SQLAlchemy at in-memory SQLite, so they run without PostgreSQL or a `.env` file. GitHub Actions runs them on every push (`.github/workflows/tests.yml`).
 
-Если вам нужно инициализировать базу данных с ролями по умолчанию, бизнес-элементами, правилами доступа и тестовыми пользователями, выполните следующую команду:
+They cover:
+- **Auth:** registration, duplicate email, password mismatch, weak password, login success and failure, logout, token refresh, current user
+- **Permissions:** admin vs. user on admin routes, reading and creating products, updating someone else's product as admin (allowed) and as a regular user (denied), creating orders
 
-```bash
-python init_db.py
-```
+## Security notes and next steps
 
-Это создаст:
-- 4 роли по умолчанию (admin, manager, user, guest)
-- 6 бизнес-элементов (products, orders, users, permissions, reports, settings)
-- Правила доступа для каждой роли
-- 4 тестовых пользователя с разными ролями
+Already in place: bcrypt hashing, short-lived access tokens, HttpOnly session cookies, inactive accounts blocked, secrets read from environment variables.
+
+Before production I would add:
+- Rate limiting on login and registration
+- `Secure` cookies behind HTTPS
+- Refresh-token rotation and revocation
+- Persisting products and orders in the database instead of in memory
+- Alembic migrations instead of `db.create_all()`
+- A Dockerfile and docker-compose setup
