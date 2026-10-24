@@ -4,14 +4,13 @@
 import pytest
 import json
 from app import create_app, db
+from config import TestConfig
 from app.models import User, Role, BusinessElement, AccessRoleRule
 
 @pytest.fixture
 def app():
     """Создание тестового приложения с данными разрешений"""
-    app = create_app()
-    app.config['TESTING'] = True
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
+    app = create_app(TestConfig)
 
     with app.app_context():
         db.create_all()
