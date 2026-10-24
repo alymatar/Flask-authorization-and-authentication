@@ -82,6 +82,16 @@ class User(db.Model):
         
         if not rule:
             return False
+
+        # "*_all" checks, used by list endpoints to decide whether to filter by owner
+        if permission_type in ('read_all', 'update_all', 'delete_all'):
+            return getattr(rule, f'{permission_type}_permission')
+
+        # No specific resource yet (collection routes): allow if the role can act
+        # on at least its own records; the view then filters by owner.
+        if resource_owner_id is None and permission_type in ('read', 'update', 'delete'):
+            return (getattr(rule, f'{permission_type}_permission')
+                    or getattr(rule, f'{permission_type}_all_permission'))
         
         # Проверить конкретный тип разрешения
         if permission_type == 'read':
